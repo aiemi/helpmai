@@ -1,0 +1,19 @@
+<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="100" height="100" rx="20" fill="#000000"/>
+  
+  <!-- Yellow H shape -->
+  <g fill="#FFD700">
+    <!-- Left part of H -->
+    <rect x="25" y="20" width="8" height="60"/>
+    <!-- Right part of H -->  
+    <rect x="67" y="20" width="8" height="60"/>
+    <!-- Cross bar of H -->
+    <rect x="25" y="46" width="50" height="8"/>
+    
+    <!-- Small circle (i dot) -->
+    <circle cx="45" cy="30" r="4"/>
+    <!-- i body -->
+    <rect x="41" y="40" width="8" height="30"/>
+  </g>
+</svg>
