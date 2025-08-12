@@ -863,7 +863,7 @@
                     </div>
                 </div>
                 
-                <form class="contact-form" id="contactForm">
+                <form class="contact-form" id="contactForm" action="https://formspree.io/f/xqalnddw" method="POST">
                     <div class="success-message" id="successMessage">
                         <span data-en="Thank you! Your request has been sent successfully. We'll get back to you within 24 hours." data-zh="谢谢！您的申请已成功发送。我们将在24小时内回复您。">Thank you! Your request has been sent successfully. We'll get back to you within 24 hours.</span>
                     </div>
@@ -967,7 +967,7 @@
             });
         });
 
-        // Form submission with email
+        // Form submission with Formspree
         document.getElementById('contactForm').addEventListener('submit', function(e) {
             e.preventDefault();
             
@@ -988,47 +988,40 @@
                 return;
             }
             
-            // Simulate form submission
+            // Submit form
             const submitBtn = this.querySelector('.submit-btn');
             const originalText = submitBtn.textContent;
             submitBtn.textContent = currentLang === 'en' ? 'Sending...' : '发送中...';
             submitBtn.disabled = true;
             
-            // Prepare email body
-            const emailBody = `
-New Contact Request from HelpmAI Website:
-
-Name: ${data.name}
-Email: ${data.email}
-
-Project Details:
-${data.message}
-
----
-Sent from HelpmAI Contact Form
-Date: ${new Date().toLocaleString()}
-            `;
-            
-            // Create mailto link
-            const mailtoLink = `mailto:jonah@helpmai.com?subject=New Contact Request - ${data.name}&body=${encodeURIComponent(emailBody)}`;
-            
-            setTimeout(() => {
-                // Open email client
-                window.location.href = mailtoLink;
-                
-                // Show success message
-                document.getElementById('successMessage').style.display = 'block';
-                
-                // Reset form
-                this.reset();
+            // Send to Formspree
+            fetch('https://formspree.io/f/xqalnddw', {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'Accept': 'application/json'
+                }
+            }).then(response => {
+                if (response.ok) {
+                    // Show success message
+                    document.getElementById('successMessage').style.display = 'block';
+                    
+                    // Reset form
+                    this.reset();
+                    
+                    // Hide success message after 5 seconds
+                    setTimeout(() => {
+                        document.getElementById('successMessage').style.display = 'none';
+                    }, 5000);
+                } else {
+                    alert(currentLang === 'en' ? 'Sorry, there was an error sending your message. Please try again.' : '抱歉，发送消息时出错。请重试。');
+                }
+            }).catch(error => {
+                alert(currentLang === 'en' ? 'Sorry, there was an error sending your message. Please try again.' : '抱歉，发送消息时出错。请重试。');
+            }).finally(() => {
                 submitBtn.textContent = originalText;
                 submitBtn.disabled = false;
-                
-                // Hide success message after 5 seconds
-                setTimeout(() => {
-                    document.getElementById('successMessage').style.display = 'none';
-                }, 5000);
-            }, 1000);
+            });
         });
 
         // Intersection Observer for animations
