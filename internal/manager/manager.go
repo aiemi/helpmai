@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"math/rand"
 	"net/textproto"
 	"strings"
 	"sync"
@@ -131,6 +132,14 @@ type Config struct {
 	ArchiveURL            string
 	RootURL               string
 	UnsubHeader           bool
+
+	// Random sending interval parameters (in seconds)
+	RandomDelayMin int
+	RandomDelayMax int
+
+	// Random batch size parameters
+	RandomBatchMin int
+	RandomBatchMax int
 
 	// Interval to scan the DB for active campaign checkpoints.
 	ScanInterval time.Duration
@@ -276,6 +285,21 @@ func (m *Manager) Run() {
 	// Indefinitely wait on the pipe queue to fetch the next set of subscribers
 	// for any active campaigns.
 	for p := range m.nextPipes {
+		// Apply rate limiting with random delay before fetching next batch
+		if m.cfg.RandomDelayMin > 0 && m.cfg.RandomDelayMax > 0 {
+			minDelay := m.cfg.RandomDelayMin
+			maxDelay := m.cfg.RandomDelayMax
+			if maxDelay > minDelay {
+				minDur := time.Duration(minDelay) * time.Second
+				maxDur := time.Duration(maxDelay) * time.Second
+				randomDelay := minDur + time.Duration(rand.Int63n(int64(maxDur-minDur)))
+				
+				m.log.Printf("batch rate limit: sleeping for %v before next batch (range %ds-%ds)", 
+					randomDelay.Round(time.Second), minDelay, maxDelay)
+				time.Sleep(randomDelay)
+			}
+		}
+		
 		has, err := p.NextSubscribers()
 		if err != nil {
 			m.log.Printf("error processing campaign batch (%s): %v", p.camp.Name, err)
@@ -453,9 +477,26 @@ func (m *Manager) worker() {
 				continue
 			}
 
-			// Pause on hitting the message rate.
+			// Pause on hitting the message rate with random interval.
 			if numMsg >= m.cfg.MessageRate {
-				time.Sleep(time.Second)
+				// Use config parameters or fallback to default values (15-45 seconds)
+				minDelay := 15
+				maxDelay := 45
+				if m.cfg.RandomDelayMin > 0 {
+					minDelay = m.cfg.RandomDelayMin
+				}
+				if m.cfg.RandomDelayMax > 0 && m.cfg.RandomDelayMax > minDelay {
+					maxDelay = m.cfg.RandomDelayMax
+				}
+				
+				// Calculate random delay
+				minDur := time.Duration(minDelay) * time.Second
+				maxDur := time.Duration(maxDelay) * time.Second
+				randomDelay := minDur + time.Duration(rand.Int63n(int64(maxDur-minDur)))
+				
+				m.log.Printf("rate limit reached. sleeping for %v (random interval %ds-%ds)", 
+					randomDelay.Round(time.Second), minDelay, maxDelay)
+				time.Sleep(randomDelay)
 				numMsg = 0
 			}
 			numMsg++

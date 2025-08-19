@@ -2,6 +2,7 @@ package manager
 
 import (
 	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,8 +75,17 @@ func (m *Manager) newPipe(c *models.Campaign) (*pipe, error) {
 // in the current batch or not. A false indicates that all subscribers
 // have been processed, or that a campaign has been paused or cancelled.
 func (p *pipe) NextSubscribers() (bool, error) {
+	// Calculate random batch size
+	batchSize := p.m.cfg.BatchSize
+	if p.m.cfg.RandomBatchMin > 0 && p.m.cfg.RandomBatchMax > 0 && p.m.cfg.RandomBatchMax > p.m.cfg.RandomBatchMin {
+		minBatch := p.m.cfg.RandomBatchMin
+		maxBatch := p.m.cfg.RandomBatchMax
+		batchSize = minBatch + rand.Intn(maxBatch-minBatch+1)
+		p.m.log.Printf("using random batch size: %d (range %d-%d)", batchSize, minBatch, maxBatch)
+	}
+
 	// Fetch the next batch of subscribers from a 'running' campaign.
-	subs, err := p.m.store.NextSubscribers(p.camp.ID, p.m.cfg.BatchSize)
+	subs, err := p.m.store.NextSubscribers(p.camp.ID, batchSize)
 	if err != nil {
 		return false, fmt.Errorf("error fetching campaign subscribers (%s): %v", p.camp.Name, err)
 	}

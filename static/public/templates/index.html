@@ -30,7 +30,7 @@
 				{{ if ne .LogoURL "" }}
 					<img src="{{ .LogoURL }}" alt="{{ .Data.Title }}" />
 				{{ else }}
-					<img src="/public/static/logo.svg?v={{ .AssetVersion }}" alt="{{ .Data.Title }}" />
+					<img src="/public/static/log.svg?v={{ .AssetVersion }}" alt="{{ .Data.Title }}" />
 				{{ end }}
 				</a>
 			</div>
@@ -41,7 +41,7 @@
 	</div>
 	
 	<footer class="container">
-		{{ L.T "public.poweredBy" }} <a target="_blank" rel="noreferrer" href="https://listmonk.app">listmonk</a>
+		{{ L.T "public.poweredBy" }} <a target="_blank" rel="noreferrer" href="https://listmonk.app">HelpmAI</a>
 	</footer>
 </body>
 </html>

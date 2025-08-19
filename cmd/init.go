@@ -556,6 +556,10 @@ func initCampaignManager(msgrs []manager.Messenger, q *models.Queries, u *UrlCon
 		SlidingWindow:         ko.Bool("app.message_sliding_window"),
 		SlidingWindowDuration: ko.Duration("app.message_sliding_window_duration"),
 		SlidingWindowRate:     ko.Int("app.message_sliding_window_rate"),
+		RandomDelayMin:        ko.Int("app.random_delay_min"),
+		RandomDelayMax:        ko.Int("app.random_delay_max"),
+		RandomBatchMin:        ko.Int("app.random_batch_min"),
+		RandomBatchMax:        ko.Int("app.random_batch_max"),
 		ScanInterval:          time.Second * 5,
 		ScanCampaigns:         !ko.Bool("passive"),
 	}, newManagerStore(q, co, md), i, lo)

@@ -1,0 +1,26 @@
+[Unit]
+Description=Listmonk newsletter and mailing list manager
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=liuanwei
+WorkingDirectory=/Users/liuanwei/listmonk
+ExecStart=/Users/liuanwei/listmonk/listmonk
+Restart=always
+RestartSec=5
+
+# Environment variables
+Environment=PATH="/usr/local/opt/postgresql@16/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

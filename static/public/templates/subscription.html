@@ -94,7 +94,7 @@
         if (a == "export") {
             f.action = "/subscription/export/{{ .Data.SubUUID }}";
             return true;
-        } else if (confirm("{{ L.T "public.privacyConfirmWipe" }}")) {
+        } else if (confirm('{{ L.T "public.privacyConfirmWipe" }}')) {
             f.action = "/subscription/wipe/{{ .Data.SubUUID }}";
             return true;
         }

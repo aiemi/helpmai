@@ -13,7 +13,7 @@ import (
 func V0_9_0(db *sqlx.DB, fs stuffbin.FileSystem, ko *koanf.Koanf, lo *log.Logger) error {
 	if _, err := db.Exec(`
 		INSERT INTO settings (key, value) VALUES
-			('app.lang', '"en"'),
+			('app.lang', '"zh-CN"'),
 			('app.message_sliding_window', 'false'),
 			('app.message_sliding_window_duration', '"1h"'),
 			('app.message_sliding_window_rate', '10000'),
