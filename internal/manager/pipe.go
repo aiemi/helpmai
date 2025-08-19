@@ -21,6 +21,9 @@ type pipe struct {
 	stopped    atomic.Bool
 	withErrors atomic.Bool
 
+	// Each pipe now has its own message queue
+	msgQ chan CampaignMessage
+
 	m *Manager
 }
 
@@ -47,6 +50,7 @@ func (m *Manager) newPipe(c *models.Campaign) (*pipe, error) {
 		camp: c,
 		rate: ratecounter.NewRateCounter(time.Minute),
 		wg:   &sync.WaitGroup{},
+		msgQ: make(chan CampaignMessage, m.cfg.Concurrency*m.cfg.MessageRate*2),
 		m:    m,
 	}
 
@@ -96,11 +100,6 @@ func (p *pipe) NextSubscribers() (bool, error) {
 		return false, nil
 	}
 
-	// Is there a sliding window limit configured?
-	hasSliding := p.m.cfg.SlidingWindow &&
-		p.m.cfg.SlidingWindowRate > 0 &&
-		p.m.cfg.SlidingWindowDuration.Seconds() > 1
-
 	// Push messages.
 	for _, s := range subs {
 		msg, err := p.newMessage(s)
@@ -109,36 +108,8 @@ func (p *pipe) NextSubscribers() (bool, error) {
 			continue
 		}
 
-		// Push the message to the queue while blocking and waiting until
-		// the queue is drained.
-		p.m.campMsgQ <- msg
-
-		// Check if the sliding window is active.
-		if hasSliding {
-			diff := time.Since(p.m.slidingStart)
-
-			// Window has expired. Reset the clock.
-			if diff >= p.m.cfg.SlidingWindowDuration {
-				p.m.slidingStart = time.Now()
-				p.m.slidingCount = 0
-				continue
-			}
-
-			// Have the messages exceeded the limit?
-			p.m.slidingCount++
-			if p.m.slidingCount >= p.m.cfg.SlidingWindowRate {
-				wait := p.m.cfg.SlidingWindowDuration - diff
-
-				p.m.log.Printf("messages exceeded (%d) for the window (%v since %s). Sleeping for %s.",
-					p.m.slidingCount,
-					p.m.cfg.SlidingWindowDuration,
-					p.m.slidingStart.Format(time.RFC822Z),
-					wait.Round(time.Second)*1)
-
-				p.m.slidingCount = 0
-				time.Sleep(wait)
-			}
-		}
+		// Push the message to this campaign's specific queue
+		p.msgQ <- msg
 	}
 
 	return true, nil
@@ -196,6 +167,9 @@ func (p *pipe) newMessage(s models.Subscriber) (CampaignMessage, error) {
 // and also triggers a notification to the admin. This only triggers once
 // a pipe's wg counter is fully exhausted, draining all messages in its queue.
 func (p *pipe) cleanup() {
+	// Close the message queue to signal workers to stop
+	close(p.msgQ)
+	
 	defer func() {
 		p.m.pipesMut.Lock()
 		delete(p.m.pipes, p.camp.ID)

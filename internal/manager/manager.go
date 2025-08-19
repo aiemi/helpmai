@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -82,15 +81,14 @@ type Manager struct {
 	links    map[string]string
 	linksMut sync.RWMutex
 
-	nextPipes chan *pipe
-	campMsgQ  chan CampaignMessage
-	msgQ      chan models.Message
+	// No more global queues - each campaign will manage its own sending
+	// nextPipes chan *pipe  // REMOVED
+	// campMsgQ  chan CampaignMessage  // REMOVED
+	// msgQ      chan models.Message  // REMOVED
 
-	// Sliding window keeps track of the total number of messages sent in a period
-	// and on reaching the specified limit, waits until the window is over before
-	// sending further messages.
-	slidingCount int
-	slidingStart time.Time
+	// No more global sliding window - each campaign manages its own rate limiting
+	// slidingCount int  // REMOVED
+	// slidingStart time.Time  // REMOVED
 
 	tplFuncs template.FuncMap
 }
@@ -173,15 +171,12 @@ func New(cfg Config, store Store, i *i18n.I18n, l *log.Logger) *Manager {
 		fnNotify: func(subject string, data any) error {
 			return notifs.NotifySystem(subject, notifs.TplCampaignStatus, data, nil)
 		},
-		log:          l,
-		messengers:   make(map[string]Messenger),
-		pipes:        make(map[int]*pipe),
-		tpls:         make(map[int]*models.Template),
-		links:        make(map[string]string),
-		nextPipes:    make(chan *pipe, 1000),
-		campMsgQ:     make(chan CampaignMessage, cfg.Concurrency*cfg.MessageRate*2),
-		msgQ:         make(chan models.Message, cfg.Concurrency*cfg.MessageRate*2),
-		slidingStart: time.Now(),
+		log:        l,
+		messengers: make(map[string]Messenger),
+		pipes:      make(map[int]*pipe),
+		tpls:       make(map[int]*models.Template),
+		links:      make(map[string]string),
+		// Removed global queue initialization - each campaign manages its own
 	}
 	m.tplFuncs = m.makeGnericFuncMap()
 
@@ -199,40 +194,22 @@ func (m *Manager) AddMessenger(msg Messenger) error {
 	return nil
 }
 
-// PushMessage pushes an arbitrary non-campaign Message to be sent out by the workers.
-// It times out if the queue is busy.
+// PushMessage pushes an arbitrary non-campaign Message to be sent out directly.
+// Since we removed global queues, non-campaign messages are sent immediately.
 func (m *Manager) PushMessage(msg models.Message) error {
-	t := time.NewTicker(pushTimeout)
-	defer t.Stop()
-
-	select {
-	case m.msgQ <- msg:
-	case <-t.C:
-		m.log.Printf("message push timed out: '%s'", msg.Subject)
-		return errors.New("message push timed out")
+	// Send message directly using the appropriate messenger
+	msgr, ok := m.messengers[msg.Messenger]
+	if !ok {
+		return fmt.Errorf("unknown messenger %s", msg.Messenger)
 	}
-
-	return nil
+	
+	return msgr.Push(msg)
 }
 
-// PushCampaignMessage pushes a campaign messages into a queue to be sent out by the workers.
-// It times out if the queue is busy.
+// PushCampaignMessage is no longer needed as each campaign manages its own message sending.
+// This function is kept for compatibility but does nothing.
 func (m *Manager) PushCampaignMessage(msg CampaignMessage) error {
-	t := time.NewTicker(pushTimeout)
-	defer t.Stop()
-
-	// Load any media/attachments.
-	if err := m.attachMedia(msg.Campaign); err != nil {
-		return err
-	}
-
-	select {
-	case m.campMsgQ <- msg:
-	case <-t.C:
-		m.log.Printf("message push timed out: '%s'", msg.Subject())
-		return errors.New("message push timed out")
-	}
-
+	// No longer used - each campaign sends messages directly
 	return nil
 }
 
@@ -266,65 +243,16 @@ func (m *Manager) GetCampaignStats(id int) CampStats {
 
 // Run is a blocking function (that should be invoked as a goroutine)
 // that scans the data source at regular intervals for pending campaigns,
-// and queues them for processing. The process queue fetches batches of
-// subscribers and pushes messages to them for each queued campaign
-// until all subscribers are exhausted, at which point, a campaign is marked
-// as "finished".
+// and launches independent goroutines for each campaign to handle sending.
+// Each campaign now runs with its own dedicated concurrency and rate limiting.
 func (m *Manager) Run() {
 	if m.cfg.ScanCampaigns {
-		// Periodically scan campaigns and push running campaigns to nextPipes
-		// to fetch subscribers from the campaign.
+		// Periodically scan campaigns and launch independent processing for each
 		go m.scanCampaigns(m.cfg.ScanInterval)
 	}
 
-	// Spawn N message workers.
-	for i := 0; i < m.cfg.Concurrency; i++ {
-		go m.worker()
-	}
-
-	// Indefinitely wait on the pipe queue to fetch the next set of subscribers
-	// for any active campaigns.
-	for p := range m.nextPipes {
-		// Apply rate limiting with random delay before fetching next batch
-		if m.cfg.RandomDelayMin > 0 && m.cfg.RandomDelayMax > 0 {
-			minDelay := m.cfg.RandomDelayMin
-			maxDelay := m.cfg.RandomDelayMax
-			if maxDelay > minDelay {
-				minDur := time.Duration(minDelay) * time.Second
-				maxDur := time.Duration(maxDelay) * time.Second
-				randomDelay := minDur + time.Duration(rand.Int63n(int64(maxDur-minDur)))
-				
-				m.log.Printf("batch rate limit: sleeping for %v before next batch (range %ds-%ds)", 
-					randomDelay.Round(time.Second), minDelay, maxDelay)
-				time.Sleep(randomDelay)
-			}
-		}
-		
-		has, err := p.NextSubscribers()
-		if err != nil {
-			m.log.Printf("error processing campaign batch (%s): %v", p.camp.Name, err)
-			continue
-		}
-
-		if has {
-			// There are more subscribers to fetch. Queue again.
-			select {
-			case m.nextPipes <- p:
-			default:
-			}
-		} else {
-			// The pipe is created with a +1 on the waitgroup pseudo counter
-			// so that it immediately waits. Subsequently, every message created
-			// is incremented in the counter in pipe.newMessage(), and when it's'
-			// processed (or ignored when a campaign is paused or cancelled),
-			// the count is's reduced in worker().
-			//
-			// This marks down the original non-message +1, causing the waitgroup
-			// to be released and the pipe to end, triggering the pg.Wait()
-			// in newPipe() that calls pipe.cleanup().
-			p.wg.Done()
-		}
-	}
+	// Keep the manager running to handle campaign lifecycle
+	select {}
 }
 
 // CacheTpl caches a template for ad-hoc use. This is currently only used by tx templates.
@@ -417,8 +345,12 @@ func (m *Manager) StopCampaign(id int) {
 
 // Close closes and exits the campaign manager.
 func (m *Manager) Close() {
-	close(m.nextPipes)
-	close(m.msgQ)
+	// Stop all running campaigns
+	m.pipesMut.Lock()
+	for _, p := range m.pipes {
+		p.Stop(false)
+	}
+	m.pipesMut.Unlock()
 }
 
 // scanCampaigns is a blocking function that periodically scans the data source
@@ -446,131 +378,8 @@ func (m *Manager) scanCampaigns(tick time.Duration) {
 			}
 			m.log.Printf("start processing campaign (%s)", c.Name)
 
-			// If subscriber processing is busy, move on. Blocking and waiting
-			// can end up in a race condition where the waiting campaign's
-			// state in the data source has changed.
-			select {
-			case m.nextPipes <- p:
-			default:
-			}
-		}
-	}
-}
-
-// worker is a blocking function that perpetually listents to events (message) on different
-// queues and processes them.
-func (m *Manager) worker() {
-	// Counter to keep track of the message / sec rate limit.
-	numMsg := 0
-	for {
-		select {
-		// Campaign message.
-		case msg, ok := <-m.campMsgQ:
-			if !ok {
-				return
-			}
-
-			// If the campaign has ended or stopped, ignore the message.
-			if msg.pipe != nil && msg.pipe.stopped.Load() {
-				// Reduce the message counter on the pipe.
-				msg.pipe.wg.Done()
-				continue
-			}
-
-			// Pause on hitting the message rate with random interval.
-			if numMsg >= m.cfg.MessageRate {
-				// Use config parameters or fallback to default values (15-45 seconds)
-				minDelay := 15
-				maxDelay := 45
-				if m.cfg.RandomDelayMin > 0 {
-					minDelay = m.cfg.RandomDelayMin
-				}
-				if m.cfg.RandomDelayMax > 0 && m.cfg.RandomDelayMax > minDelay {
-					maxDelay = m.cfg.RandomDelayMax
-				}
-				
-				// Calculate random delay
-				minDur := time.Duration(minDelay) * time.Second
-				maxDur := time.Duration(maxDelay) * time.Second
-				randomDelay := minDur + time.Duration(rand.Int63n(int64(maxDur-minDur)))
-				
-				m.log.Printf("rate limit reached. sleeping for %v (random interval %ds-%ds)", 
-					randomDelay.Round(time.Second), minDelay, maxDelay)
-				time.Sleep(randomDelay)
-				numMsg = 0
-			}
-			numMsg++
-
-			// Outgoing message.
-			out := models.Message{
-				From:        msg.from,
-				To:          []string{msg.to},
-				Subject:     msg.subject,
-				ContentType: msg.Campaign.ContentType,
-				Body:        msg.body,
-				AltBody:     msg.altBody,
-				Subscriber:  msg.Subscriber,
-				Campaign:    msg.Campaign,
-				Attachments: msg.Campaign.Attachments,
-			}
-
-			h := textproto.MIMEHeader{}
-			h.Set(models.EmailHeaderCampaignUUID, msg.Campaign.UUID)
-			h.Set(models.EmailHeaderSubscriberUUID, msg.Subscriber.UUID)
-
-			// Attach List-Unsubscribe headers?
-			if m.cfg.UnsubHeader {
-				h.Set("List-Unsubscribe-Post", "List-Unsubscribe=One-Click")
-				h.Set("List-Unsubscribe", `<`+msg.unsubURL+`>`)
-			}
-
-			// Attach any custom headers.
-			if len(msg.Campaign.Headers) > 0 {
-				for _, set := range msg.Campaign.Headers {
-					for hdr, val := range set {
-						h.Add(hdr, val)
-					}
-				}
-			}
-
-			// Set the headers.
-			out.Headers = h
-
-			// Push the message to the messenger.
-			err := m.messengers[msg.Campaign.Messenger].Push(out)
-			if err != nil {
-				m.log.Printf("error sending message in campaign %s: subscriber %d: %v", msg.Campaign.Name, msg.Subscriber.ID, err)
-			}
-
-			// Increment the send rate or the error counter if there was an error.
-			if msg.pipe != nil {
-				// Mark the message as done.
-				msg.pipe.wg.Done()
-
-				if err != nil {
-					// Call the error callback, which keeps track of the error count
-					// and stops the campaign if the error count exceeds the threshold.
-					msg.pipe.OnError()
-				} else {
-					id := uint64(msg.Subscriber.ID)
-					if id > msg.pipe.lastID.Load() {
-						msg.pipe.lastID.Store(uint64(msg.Subscriber.ID))
-					}
-					msg.pipe.rate.Incr(1)
-					msg.pipe.sent.Add(1)
-				}
-			}
-
-		// Arbitrary message.
-		case msg, ok := <-m.msgQ:
-			if !ok {
-				return
-			}
-
-			// Push the message to the messenger.
-			if err := m.messengers[msg.Messenger].Push(msg); err != nil {
-				m.log.Printf("error sending message '%s': %v", msg.Subject, err)
-			}
+			// Launch an independent goroutine for this campaign
+			go m.runCampaign(p)
 		}
 	}
 }
@@ -703,4 +512,159 @@ func MakeAttachmentHeader(filename, encoding, contentType string) textproto.MIME
 	h.Set("Content-Type", fmt.Sprintf("%s; name=\""+filename+"\"", contentType))
 	h.Set("Content-Transfer-Encoding", encoding)
 	return h
+}
+
+// runCampaign runs a single campaign independently with its own rate limiting and concurrency.
+// This function processes all subscribers for the given campaign.
+func (m *Manager) runCampaign(p *pipe) {
+	defer func() {
+		// Clean up the pipe when done
+		m.pipesMut.Lock()
+		delete(m.pipes, p.camp.ID)
+		m.pipesMut.Unlock()
+		p.cleanup()
+	}()
+
+	// Launch workers for this specific campaign
+	for i := 0; i < m.cfg.Concurrency; i++ {
+		go m.campaignWorker(p)
+	}
+
+	// Process all batches for this campaign
+	for {
+		// Apply rate limiting with random delay before fetching next batch
+		if m.cfg.RandomDelayMin > 0 && m.cfg.RandomDelayMax > 0 {
+			minDelay := m.cfg.RandomDelayMin
+			maxDelay := m.cfg.RandomDelayMax
+			if maxDelay > minDelay {
+				minDur := time.Duration(minDelay) * time.Second
+				maxDur := time.Duration(maxDelay) * time.Second
+				randomDelay := minDur + time.Duration(rand.Int63n(int64(maxDur-minDur)))
+				
+				m.log.Printf("batch rate limit: sleeping for %v before next batch (range %ds-%ds)", 
+					randomDelay.Round(time.Second), minDelay, maxDelay)
+				time.Sleep(randomDelay)
+			}
+		}
+		
+		has, err := p.NextSubscribers()
+		if err != nil {
+			m.log.Printf("error processing campaign batch (%s): %v", p.camp.Name, err)
+			break
+		}
+
+		if !has {
+			// No more subscribers, campaign is finished
+			p.wg.Done()
+			break
+		}
+	}
+}
+
+// sendMessage sends a campaign message using the appropriate messenger.
+func (m *Manager) sendMessage(msg CampaignMessage) error {
+	// If the campaign has ended or stopped, ignore the message.
+	if msg.pipe != nil && msg.pipe.stopped.Load() {
+		return nil
+	}
+
+	// Outgoing message.
+	out := models.Message{
+		From:        msg.from,
+		To:          []string{msg.to},
+		Subject:     msg.subject,
+		ContentType: msg.Campaign.ContentType,
+		Body:        msg.body,
+		AltBody:     msg.altBody,
+		Subscriber:  msg.Subscriber,
+		Campaign:    msg.Campaign,
+		Attachments: msg.Campaign.Attachments,
+	}
+
+	h := textproto.MIMEHeader{}
+	h.Set(models.EmailHeaderCampaignUUID, msg.Campaign.UUID)
+	h.Set(models.EmailHeaderSubscriberUUID, msg.Subscriber.UUID)
+
+	// Attach List-Unsubscribe headers?
+	if m.cfg.UnsubHeader {
+		h.Set("List-Unsubscribe-Post", "List-Unsubscribe=One-Click")
+		h.Set("List-Unsubscribe", `<`+msg.unsubURL+`>`)
+	}
+
+	// Attach any custom headers.
+	if len(msg.Campaign.Headers) > 0 {
+		for _, set := range msg.Campaign.Headers {
+			for hdr, val := range set {
+				h.Add(hdr, val)
+			}
+		}
+	}
+
+	// Set the headers.
+	out.Headers = h
+
+	// Push the message to the messenger.
+	err := m.messengers[msg.Campaign.Messenger].Push(out)
+	if err != nil {
+		m.log.Printf("error sending message in campaign %s: subscriber %d: %v", msg.Campaign.Name, msg.Subscriber.ID, err)
+	}
+
+	// Increment the send rate or the error counter if there was an error.
+	if msg.pipe != nil {
+		if err != nil {
+			// Call the error callback, which keeps track of the error count
+			// and stops the campaign if the error count exceeds the threshold.
+			msg.pipe.OnError()
+		} else {
+			id := uint64(msg.Subscriber.ID)
+			if id > msg.pipe.lastID.Load() {
+				msg.pipe.lastID.Store(uint64(msg.Subscriber.ID))
+			}
+			msg.pipe.rate.Incr(1)
+			msg.pipe.sent.Add(1)
+		}
+	}
+
+	return err
+}
+
+// campaignWorker is a worker that processes messages for a specific campaign.
+func (m *Manager) campaignWorker(p *pipe) {
+	// Counter to keep track of the message / sec rate limit.
+	numMsg := 0
+	for {
+		select {
+		case msg, ok := <-p.msgQ:
+			if !ok {
+				// Channel closed, campaign finished
+				return
+			}
+
+			if msg.Campaign.Status != models.CampaignStatusRunning {
+				// Campaign has been paused or cancelled.
+				p.wg.Done()
+				continue
+			}
+
+			// Throttle message sending according to the configured rate.
+			if numMsg >= m.cfg.MessageRate {
+				select {
+				case <-time.After(time.Second):
+					numMsg = 0
+				}
+			}
+
+			// Send the message.
+			err := m.sendMessage(msg)
+			if err != nil {
+				m.log.Printf("error sending message: %v", err)
+			}
+
+			numMsg++
+			p.wg.Done()
+
+		case <-time.After(time.Second):
+			numMsg = 0
+		}
+	}
 }
